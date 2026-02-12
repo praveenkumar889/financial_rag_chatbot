@@ -1,13 +1,20 @@
 import os
 import json
 import logging
+import re
+import fitz  # PyMuPDF
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 
+# --------------------------------------------------
+# DEFAULT IMAGE INPUT FOLDER
+# --------------------------------------------------
+DEFAULT_IMAGE_FOLDER = r"C:\financial_agent\images_from_pdf\INFY\Infy_Fy2025"
+
 def run_table_detection(
-    image_dir,
-    output_dir,
-    model_path,
+    image_dir=DEFAULT_IMAGE_FOLDER,
+    output_dir=r"C:\financial_agent\outputs\table_detection",
+    model_path="yolo26_best.pt",
     conf=0.4
 ):
     """
@@ -127,4 +134,86 @@ def run_table_detection(
     print(f"📂 Only images with tables were saved to: {marked_images_dir}")
     print(f"📊 JSON log saved to: {log_path}")
 
-    return per_image_results, summary_metrics
+    # --------------------------------------------------
+    # CREATE TABLE-ONLY PDF
+    # --------------------------------------------------
+
+    table_image_paths = []
+    table_page_numbers = set()
+
+    for r in per_image_results:
+        if r["tables_detected"] > 0:
+            image_name = r["image"]  # page_12.png
+            match = re.search(r'page_(\d+)', image_name)
+            if match:
+                page_num = int(match.group(1))
+                table_page_numbers.add(page_num)
+
+                full_img_path = os.path.join(image_dir, image_name)
+                table_image_paths.append(full_img_path)
+
+    # Sort images by page number
+    table_image_paths = sorted(
+        table_image_paths,
+        key=lambda x: int(re.search(r'page_(\d+)', x).group(1))
+    )
+
+    table_pdf_path = None
+
+    if table_image_paths:
+
+        # 🔥 Extract company name dynamically
+        # image_dir = C:\financial_agent\images_from_pdf\INFY\Infy_Fy2025
+        # We need to handle potential trailing slashes
+        clean_path = os.path.normpath(image_dir)
+        parts = clean_path.split(os.sep)
+
+        # Company folder is 2 levels up relative to the image folder name
+        # images_from_pdf (previous) -> INFY (interest) -> Infy_Fy2025 (current)
+        if len(parts) >= 2:
+            company_name = parts[-2]
+        else:
+            company_name = "Unknown"
+
+        # Ensure input_pdf directory exists
+        input_pdf_dir = r"C:\financial_agent\input_pdf"
+        os.makedirs(input_pdf_dir, exist_ok=True)
+
+        table_pdf_path = os.path.join(
+            input_pdf_dir,
+            f"{company_name}_tables.pdf"
+        )
+
+        table_doc = fitz.open()
+
+        for img_path in table_image_paths:
+            img = fitz.open(img_path)
+            pdf_bytes = img.convert_to_pdf()
+            img_pdf = fitz.open("pdf", pdf_bytes)
+            table_doc.insert_pdf(img_pdf)
+            img.close()
+
+        # Save with garbage collection/deflate to keep it clean
+        table_doc.save(table_pdf_path, garbage=4, deflate=True)
+        table_doc.close()
+
+        print(f"📄 Table PDF created at: {table_pdf_path}")
+        print(f"📌 Table Pages Detected: {sorted(table_page_numbers)}")
+
+    else:
+        print("⚠️ No tables detected.")
+
+    return per_image_results, summary_metrics, table_page_numbers, table_pdf_path
+
+if __name__ == "__main__":
+    print("🚀 Running Table Detection...")
+
+    # Ensure model path is correct based on where script is run
+    # If script run from c:\financial_agent\imagestopdf_tabledetection, it's just filename
+    # If run from root, might need full path.  Using default argument "yolo26_best.pt" assumes CWD.
+    
+    try:
+        results, metrics, pages, pdf_path = run_table_detection()
+        print("✅ Done.")
+    except Exception as e:
+        print(f"❌ Error: {e}")

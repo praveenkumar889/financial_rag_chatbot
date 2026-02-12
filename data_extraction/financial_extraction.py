@@ -1082,11 +1082,21 @@ class PDFNarrativeExtractor:
         print(f" Extracted Facts (Awards): {len(self.award_blocks)}")
         print("="*40 + "\n")
 
-def run_extraction(pdf_config):
+def run_extraction(pdf_path, skip_pages=None, output_folder=None):
     """Run pipeline for a specific configuration"""
-    input_path = pdf_config["path"]
-    table_pages = pdf_config.get("skip_pages", set())
-    output_subfolder = pdf_config["output_folder"]
+    # --------------------------------------------------
+    # ARGUMENT STANDARDIZATION
+    # --------------------------------------------------
+    if skip_pages is None:
+        skip_pages = set()
+    
+    if output_folder is None:
+        # Default output if not provided
+        output_folder = r"C:\financial_agent\outputs\financial_extraction"
+
+    input_path = pdf_path
+    table_pages = skip_pages
+    output_subfolder = output_folder
     
     print(f"\n{'='*50}")
     print(f"STARTING JOB: {str(Path(input_path).name)}")
@@ -1133,12 +1143,16 @@ if __name__ == "__main__":
     
     if target_config:
         print("✅ Found matching configuration.")
-        run_extraction(target_config)
+        run_extraction(
+            pdf_path=target_config["path"],
+            skip_pages=target_config.get("skip_pages"),
+            output_folder=target_config["output_folder"]
+        )
     else:
         # Fallback for new/unconfigured files
         print("⚠️ No specific config found - Running generic extraction to 'output/generic'")
-        run_extraction({
-             "path": SELECTED_PDF,
-             "skip_pages": set(),
-             "output_folder": r"C:\financial_agent\outputs\financial_extraction"
-        })
+        run_extraction(
+             pdf_path=SELECTED_PDF,
+             skip_pages=set(),
+             output_folder=r"C:\financial_agent\outputs\financial_extraction"
+        )
