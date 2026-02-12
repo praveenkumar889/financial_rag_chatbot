@@ -1,0 +1,11 @@
+boto3
+langchain
+langchain-community
+langchain-openai
+faiss-cpu
+python-dotenv
+pillow
+pypdf
+tiktoken
+streamlit
+pymupdf
