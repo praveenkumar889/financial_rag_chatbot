@@ -641,7 +641,8 @@ def answer_question(user_query: str) -> dict:
             "sources": []
         }
 
-    query_embedding = get_query_embedding(expanded_query)
+    normalized_query = expanded_query.strip().lower()
+    query_embedding = get_query_embedding(normalized_query)
     if not query_embedding:
         return { "answer": "Error generating embedding.", "confidence": "Low", "score": 0.0, "sources": [] }
 
@@ -739,12 +740,13 @@ def answer_question(user_query: str) -> dict:
 
     search_results = deduplicate_results(search_results)
     
-    # RECALL UPGRADE: Lower strict threshold to 0.65 to let Reranker decide
-    search_results = filter_by_score(search_results, min_score=0.65)
-    search_results = resolve_financial_conflicts(search_results)
+    # RECALL UPGRADE: Remove hard filter to let Reranker decide (Production Fix)
+    # search_results = filter_by_score(search_results, min_score=0.55)
+    search_results = sorted(search_results, key=lambda x: x["score"], reverse=True)
+    # Optimization: Moved resolve_financial_conflicts to AFTER reranking to avoid double sorting
     
     if not search_results:
-        return { "answer": "No high-confidence results found. Try rephrasing.", "confidence": "Low", "score": 0.0, "sources": [] }
+        return { "answer": "I cannot find the answer in the provided documents.", "confidence": "Low", "score": 0.0, "sources": [] }
 
     # RECALL UPGRADE: LLM Reranking
     # We select the top 5 most relevant chunks from the top 15 retrieved
@@ -756,7 +758,10 @@ def answer_question(user_query: str) -> dict:
             
             Retrieved Chunks:
             """
-            for i, doc in enumerate(search_results):
+            
+            # Optimization: Limit reranking to top 12 candidates for precision & latency
+            candidate_pool = search_results[:12]
+            for i, doc in enumerate(candidate_pool):
                 rerank_prompt += f"[{i}] {doc['text'][:300]}...\n"
                 
             rerank_prompt += """
@@ -772,11 +777,12 @@ def answer_question(user_query: str) -> dict:
                 temperature=0,
                 response_format={"type": "json_object"}
             )
-            import json
+            # import json (Removed duplicate)
             indices = json.loads(rerank_response.choices[0].message.content).get("indices", [])
             
             if indices:
-                reranked_results = [search_results[i] for i in indices if i < len(search_results)]
+                # Map back to original pool
+                reranked_results = [candidate_pool[i] for i in indices if i < len(candidate_pool)]
                 if reranked_results:
                     search_results = reranked_results
                     logger.info(f"Reranking kept {len(search_results)} chunks.")
@@ -787,15 +793,6 @@ def answer_question(user_query: str) -> dict:
 
     retrieval_confidence = sum(r["score"] for r in search_results) / len(search_results)
     
-    confidence_label = "Low"
-    if retrieval_confidence > 0.88:
-        confidence_label = "High"
-    elif retrieval_confidence > 0.80:
-        confidence_label = "Medium"
-
-    if retrieval_confidence < 0.72:
-        confidence_label = "Low"
-        
     logger.info(f"Found {len(search_results)} relevant chunks.")
     
     # Sort by Hierarchy and Score
@@ -826,10 +823,6 @@ def answer_question(user_query: str) -> dict:
     # Post-Generation Helper: Check for missing numbers in numeric mode
     if answer_mode == "EXTRACTIVE_NUMERIC" and not any(c.isdigit() for c in final_answer):
         logger.warning("Numeric answer mode requested, but no numbers found in answer. Potential narrative fallback.")
-        # We could force a retry here, but for now just log it.
-
-    if final_answer == "Error generating answer from LLM.":
-        confidence_label = "Low"
     
     # 8. Self-Correction Loop
     # SKIP if we have an authoritative source and no obvious conflict/error is flagged by simple heuristics
@@ -837,7 +830,12 @@ def answer_question(user_query: str) -> dict:
     # User Request: "If authoritative_source_found and no_conflict: skip_self_correction()"
     # We will skip if confidence is already very high from retrieval (e.g. Table + High Consistency)
     
-    should_skip_check = has_authoritative_source and intent == "financial_data" and "unavailable" not in final_answer.lower()
+    should_skip_check = (
+        has_authoritative_source 
+        and intent == "financial_data" 
+        and "unavailable" not in final_answer.lower()
+        and retrieval_confidence > 0.80
+    )
     
     if should_skip_check:
         logger.info("Skipping self-correction (Authoritative Source Found)")
@@ -875,7 +873,7 @@ def answer_question(user_query: str) -> dict:
     else:
         retrieval_score = 0.0
         
-    final_confidence_value = (0.5 * source_score) + (0.3 * check_score) + (0.2 * retrieval_score)
+    final_confidence_value = (0.4 * source_score) + (0.3 * check_score) + (0.3 * retrieval_score)
     
     if final_confidence_value >= 0.85:
         confidence_label = "High"
@@ -954,7 +952,7 @@ Original Draft:
         confidence_label = "Low"
 
     sources_list = []
-    if confidence_label != "Low":
+    if search_results: # Always show sources if we retrieved something (Transparency)
         seen_sources = set()
         for doc in search_results:
             meta = doc["metadata"]
