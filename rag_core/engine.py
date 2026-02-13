@@ -33,6 +33,12 @@ DB_NAME = os.getenv("MONGO_DB_NAME", "financial_rag")
 COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "rag_chunks")
 VECTOR_INDEX_NAME = "vector_index" # MUST match the index name you created in Atlas
 
+# DEBUG: Verify Env Loading
+# logger.info(f"DEBUG: Loading Env from {os.path.join(basedir, '.env')}")
+# logger.info(f"DEBUG: MONGO_URI Found: {'Yes' if MONGO_URI else 'No'}")
+# logger.info(f"DEBUG: DB_NAME: {DB_NAME}")
+# logger.info(f"DEBUG: COLLECTION: {COLLECTION_NAME}")
+
 # Initialize Azure Client
 client = AzureOpenAI(
     azure_endpoint=AZURE_ENDPOINT,
@@ -453,10 +459,9 @@ def generate_answer(query, context, chat_history=None, intent="general", answer_
 - You MUST extract and report the exact numeric values verbatim from the context.
 - Do NOT utilize narrative summaries if a numeric value exists.
 - If multiple values exist (e.g., Reported vs Adjusted), list BOTh with clear labels.
-- Structure: Use a bulleted list for clarity.
+- Structure: Provide a single, concise sentence containing the value and context.
 - NO NARRATIVE ESCAPE: Do not say "Management reported strong growth" without the number.
-- Answer format:
-  * Metric: [Value] [Currency] ([Source])
+- Answer format: [Metric] was [Value] [Currency] in [Period] ([Source]).
 """
     elif intent == "comparison":
         style_guide = """
@@ -524,7 +529,7 @@ Answer:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1 # Low temperature for factual accuracy
+            temperature=0.4 # Zero temperature for factual accuracy
         )
         return response.choices[0].message.content
     except Exception as e:
