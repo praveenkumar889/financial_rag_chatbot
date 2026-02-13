@@ -323,115 +323,122 @@ def save_to_s3_as_excel(bucket, file_key, tables_data):
     except ClientError as e:
         print(f"Error saving Excel to S3: {e}")
 
-def main():
+def run_table_extraction(pdf_path, output_folder=None):
+    """
+    Executes the table extraction pipeline for a single PDF.
+    Uploads to S3, runs Textract, and saves processed JSON and Text outputs.
+    Returns the path to the generated semantic .txt file.
+    """
+    if output_folder is None:
+        output_folder = LOCAL_OUTPUT_DIR
+        
+    os.makedirs(output_folder, exist_ok=True)
+    
     if not S3_BUCKET_NAME:
-        print("Error: S3_BUCKET_NAME not set in .env")
-        return
+        raise ValueError("S3_BUCKET_NAME not set in .env")
         
-    # Ensure local output directory exists
-    if not os.path.exists(LOCAL_OUTPUT_DIR):
-        os.makedirs(LOCAL_OUTPUT_DIR)
-        print(f"Created local output directory: {LOCAL_OUTPUT_DIR}")
-
-    # Ensure input and output folders exist in the bucket
-    ensure_bucket_folders(S3_BUCKET_NAME, [INPUT_PREFIX, OUTPUT_PREFIX])
-
-    # Ensure input and output folders exist in the bucket
-    ensure_bucket_folders(S3_BUCKET_NAME, [INPUT_PREFIX, OUTPUT_PREFIX])
-
-    # Sync local files to S3
-    sync_local_to_s3(LOCAL_INPUT_DIR, S3_BUCKET_NAME, INPUT_PREFIX)
-
-    print(f"Scanning bucket '{S3_BUCKET_NAME}' folder '{INPUT_PREFIX}'...")
-    
-    files = list_input_files(S3_BUCKET_NAME, INPUT_PREFIX)
-    
-    # Filter to only process INFY_Tables.pdf as per current focus
-    files = [f for f in files if "INFY_Tables.pdf" in f]
-    
-    if not files:
-        print("No matching files found in the input folder.")
-        return
-
-    print(f"Found {len(files)} files. Starting processing...")
-
-    for file_key in files:
-        job_id = start_table_extraction(
-            bucket=S3_BUCKET_NAME,
-            document_key=file_key,
-            output_bucket=S3_BUCKET_NAME,
-            output_prefix=OUTPUT_PREFIX
-        )
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
         
-        if job_id:
-            print(f"Job started! Job ID: {job_id}")
-            result = get_job_results(job_id)
+    filename = os.path.basename(pdf_path)
+    file_name_no_ext = os.path.splitext(filename)[0]
+    
+    # 1. Upload to S3 (Input)
+    s3_key = f"{INPUT_PREFIX}{filename}"
+    s3 = get_s3_client()
+    
+    try:
+        s3.head_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        print(f"File {filename} checks out in S3.")
+    except ClientError:
+        print(f"Uploading {filename} to S3 ({S3_BUCKET_NAME}/{s3_key})...")
+        s3.upload_file(pdf_path, S3_BUCKET_NAME, s3_key)
+
+    # 2. Start Textract Job
+    job_id = start_table_extraction(
+        bucket=S3_BUCKET_NAME,
+        document_key=s3_key,
+        output_bucket=S3_BUCKET_NAME,
+        output_prefix=OUTPUT_PREFIX
+    )
+    
+    if not job_id:
+        raise Exception("Failed to start Textract job.")
+        
+    # 3. Wait for Results
+    print(f"Job started! Job ID: {job_id}")
+    result = get_job_results(job_id)
+    
+    if not result:
+        raise Exception("Textract job failed to return results.")
+
+    # 4. Parse Results
+    print("Parsing Textract results...")
+    document_metadata = {
+        "document_name": filename,
+        "s3_bucket": S3_BUCKET_NAME,
+        "s3_key": s3_key,
+        "textract_job_id": job_id,
+        "extraction_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "aws_textract"
+    }
+
+    clean_tables = parse_textract_to_json(result)
+    
+    for table in clean_tables:
+        table["document_metadata"] = document_metadata
+
+    # 5. Save Outputs Locally
+    
+    # JSON
+    json_filename = f"{file_name_no_ext}_tables.json"
+    json_path = os.path.join(output_folder, json_filename)
+    with open(json_path, 'w') as f:
+        json.dump(clean_tables, f, indent=4)
+    print(f"Saved JSON: {json_path}")
+    
+    # TXT (Semantic Narrative) - This is what we return for Ingestion
+    txt_filename = f"{file_name_no_ext}.txt" # Standard naming for ingest
+    txt_path = os.path.join(output_folder, txt_filename)
+    
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        for table in clean_tables:
+            header = f"Table {table['table_number']} | Page {table['page_number']} | Type: {table['financial_section']}"
+            f.write(f"[{header}]\n")
+            f.write("RAW DATA: " + table['embedding_text'] + "\n")
+            if table.get('narrative_text'):
+                f.write("NARRATIVE:\n")
+                for sentence in table['narrative_text']:
+                    f.write(f"- {sentence}\n")
+            f.write("-" * 80 + "\n")
             
-            if result:
-                try:
-                    # 1. Create Document Metadata
-                    document_metadata = {
-                        "document_name": os.path.basename(file_key),
-                        "s3_bucket": S3_BUCKET_NAME,
-                        "s3_key": file_key,
-                        "textract_job_id": job_id,
-                        "extraction_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "source": "aws_textract"
-                    }
+    print(f"Saved Narrative TXT: {txt_path}")
+    
+    # 6. Save Excel to S3 (Optional but requested feature)
+    try:
+        save_to_s3_as_excel(S3_BUCKET_NAME, s3_key, clean_tables)
+    except Exception as e:
+        print(f"Warning: Failed to save Excel to S3: {e}")
 
-                    # 2. Parse into Clean JSON
-                    clean_tables = parse_textract_to_json(result)
-                    
-                    # 3. Attach metadata to each table
-                    for table in clean_tables:
-                        table["document_metadata"] = document_metadata
+    return txt_path
 
-                    # 4. Save JSON Locally
-                    original_filename = os.path.basename(file_key)
-                    file_name_no_ext = os.path.splitext(original_filename)[0]
-                    local_filename = f"{file_name_no_ext}_tables.json"
-                    local_path = os.path.join(LOCAL_OUTPUT_DIR, local_filename)
-                    
-                    with open(local_path, 'w') as f:
-                        json.dump(clean_tables, f, indent=4)
-                    print(f"Saved CLEAN JSON output locally to: {local_path}")
-
-                    # 4b. Save Narrative Semantic Text Locally (For RAG/Embeddings)
-                    txt_filename = f"{file_name_no_ext}_tables.txt"
-                    txt_path = os.path.join(LOCAL_OUTPUT_DIR, txt_filename)
-                    
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        for table in clean_tables:
-                            header = f"Table {table['table_number']} | Page {table['page_number']} | Type: {table['financial_section']}"
-                            f.write(f"[{header}]\n")
-                            f.write("RAW DATA: " + table['embedding_text'] + "\n")
-                            if table.get('narrative_text'):
-                                f.write("NARRATIVE:\n")
-                                for sentence in table['narrative_text']:
-                                    f.write(f"- {sentence}\n")
-                            f.write("-" * 80 + "\n")
-                    print(f"Saved SEMANTIC TEXT output locally to: {txt_path}")
-                    
-                    # 5. Save JSON to S3 (New)
-                    s3 = get_s3_client()
-                    json_output_key = f"{OUTPUT_PREFIX}{file_name_no_ext}_tables.json"
-                    try:
-                        s3.put_object(
-                            Bucket=S3_BUCKET_NAME,
-                            Key=json_output_key,
-                            Body=json.dumps(clean_tables, indent=2)
-                        )
-                        print(f"Saved JSON output to S3: s3://{S3_BUCKET_NAME}/{json_output_key}")
-                    except ClientError as e:
-                        print(f"Error saving JSON to S3: {e}")
-
-                    # 6. Save Excel to S3
-                    save_to_s3_as_excel(S3_BUCKET_NAME, file_key, clean_tables)
-                    
-                except Exception as e:
-                    print(f"Error processing results: {e}")
-            
-            print("-" * 50)
+def main():
+    # CLI Support
+    if len(sys.argv) > 1:
+        pdf_path = sys.argv[1]
+    else:
+        # Default for testing
+        pdf_path = os.path.join(LOCAL_INPUT_DIR, "INFY_Tables.pdf")
+        
+    print(f"Running table extraction on: {pdf_path}")
+    if os.path.exists(pdf_path):
+        try:
+            out = run_table_extraction(pdf_path, LOCAL_OUTPUT_DIR)
+            print(f"Success! Output: {out}")
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        print("File not found.")
 
 if __name__ == "__main__":
     main()

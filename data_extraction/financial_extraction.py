@@ -1034,18 +1034,20 @@ class PDFNarrativeExtractor:
             })
 
     def generate_narrative_output(self, output_file):
-        """Step 7: Output Generation"""
-        print(f"Generating output to {output_file}...")
+        """Step 7: Narrative Generation"""
+        print(f"Generating Output: {output_file}")
         
-        if not self.output_text:
-            print("Warning: No content to write.")
-            return
-
         with open(output_file, "w", encoding="utf-8") as f:
             for sec in self.output_text:
                 level = sec.get('level', 'LEVEL 1') 
+                page_span = sec.get('page_span', sec.get('page'))
+                
+                # Add Metadata Header for RAG ingestion
+                # Format: [METADATA | Key=Val | Key2=Val2]
+                f.write(f"[METADATA | Page={page_span} | Section={sec['title']}]\n")
+                
                 # 🔥 FIX 1: SHOW PAGE SPAN IN TXT HEADER
-                header = f"[SECTION ID: {sec['id']} | LEVEL: {level} | IMPORTANCE: {sec['importance']:.1f}] {sec['title']} (Pages: {sec.get('page_span', sec['page'])})"
+                header = f"[SECTION ID: {sec['id']} | LEVEL: {level} | IMPORTANCE: {sec['importance']:.1f}] {sec['title']} (Pages: {page_span})"
                 f.write(header + "\n")
                 f.write(sec['content'] + "\n\n")
                 f.write("-" * 40 + "\n\n")

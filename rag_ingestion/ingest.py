@@ -453,16 +453,22 @@ def process_file(filepath, doc_type, collection, additional_metadata=None):
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Split by Page Analysis headers if present
-    # "--- Analysis of Page X ---"
-    pages = re.split(r'--- Analysis of Page \d+ ---', content)
+    # Split by our standardized Metadata Headers or Analysis Headers
+    # Pattern: [METADATA | Key=Val] or --- Analysis of Page X ---
+    # We will split by newline to process line-by-line streaming style, 
+    # but for block-based, let's keep it simple: split by double newline and check for header.
+    
+    # Improved Strategy:
+    # 1. Read entire content.
+    # 2. Split by `[METADATA` tags to separate sections.
+    
+    sections = re.split(r'(?=\[METADATA)', content)
     
     doc_name = os.path.basename(filepath).replace(".txt", "")
     
     base_metadata = {
         "document_name": doc_name,
         "document_type": doc_type,
-        # Improvement: Avoid hardcoding "Infosys"
         "company": additional_metadata.get("company", "Unknown") if additional_metadata else "Unknown",
         "ingested_at": datetime.utcnow()
     }
@@ -471,24 +477,32 @@ def process_file(filepath, doc_type, collection, additional_metadata=None):
         base_metadata.update(additional_metadata)
 
     chunks_to_insert = []
-    BATCH_SIZE = 100 # Flush often to keep SSL alive
+    BATCH_SIZE = 100 
     total_upserted = 0
     
-    for page_content in pages:
-        if not page_content.strip():
+    for section_content in sections:
+        if not section_content.strip():
             continue
             
         # Extract embedded metadata
-        cleaned_text, page_meta = parse_header_metadata(page_content)
+        cleaned_text, section_meta = parse_header_metadata(section_content)
         
         # Merge metadata
-        current_meta = {**base_metadata, **page_meta}
+        current_meta = {**base_metadata, **section_meta}
         
-        # Normalize page number (Ensure 'page_number' exists if 'page' is present)
+        # Normalize page number
         if "page" in current_meta and "page_number" not in current_meta:
             current_meta["page_number"] = current_meta["page"]
         
-        # Chunk the page content
+        # Determine strict content type based on source
+        if doc_type == "transcript":
+             current_meta["document_type"] = "transcript"
+        elif doc_type == "financial_report":
+             current_meta["document_type"] = "annual_report"
+        elif doc_type == "presentation":
+             current_meta["document_type"] = "ppt"
+             
+        # Chunk the section content
         text_chunks = chunk_narrative_text(cleaned_text, current_meta)
         
         for item in text_chunks:

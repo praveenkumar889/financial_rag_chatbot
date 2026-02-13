@@ -315,10 +315,11 @@ class PDFNarrativeExtractor:
 
     def generate_narrative_output(self, output_path):
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write(f"DOCUMENT: {Path(self.pdf_path).name}\n")
-            f.write("="*50 + "\n\n")
-            
             for sec in self.output_text:
+                # Add Metadata Header for RAG ingestion
+                # Format: [METADATA | Key=Val | Key2=Val2]
+                f.write(f"[METADATA | Page={sec['page_span']} | Speaker={sec['speaker']}]\n")
+                
                 f.write(f"SPEAKER: {sec['speaker']}\n")
                 f.write(f"Pages: {sec['page_span']}\n")
                 f.write("-" * 20 + "\n")

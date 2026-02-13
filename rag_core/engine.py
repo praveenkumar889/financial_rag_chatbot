@@ -436,7 +436,12 @@ def build_context(search_results, max_tokens=3000):
             speaker_info = f" | Speaker: {speaker} ({role})"
         
         # Create context part
-        part = f"--- Source {i}: {source} ({chunk_type}, Page {page}{speaker_info}) ---\n{text}"
+        # Improvement: Removing "Source {i}" index to prevent "Source 1" style citations in answer
+        # If Page is NA, do not show "Page: NA" to LLM to avoid bad citations
+        if str(page) == "NA":
+             part = f"--- Document: {source} | Type: {chunk_type}{speaker_info} ---\n{text}"
+        else:
+             part = f"--- Document: {source} | Page: {page} | Type: {chunk_type}{speaker_info} ---\n{text}"
         part_tokens = count_tokens(part)
         
         # Check size limit
@@ -581,25 +586,15 @@ def answer_question(user_query: str) -> dict:
         logger.info(f"Extracted Entities: {entities}")
     
     is_comparison = "difference" in user_query.lower() or "growth" in user_query.lower() or "compare" in user_query.lower()
-    is_vague_followup = (
-        len(user_query.split()) < 7 
-        and entities.get("metric") is None
-        and intent != "management_commentary"
-    )
-
-    if intent != "management_commentary" and (is_comparison or is_vague_followup) and conversation_state.last_metric:
-        if not entities.get("metric"):
+    
+    # PRODUCTION UPGRADE: Removed pre-retrieval blocking for "vague" queries.
+    # We now let vector search happen first. Clarification is asked only if retrieval fails or confidence is low.
+    
+    if intent != "management_commentary" and is_comparison and conversation_state.last_metric:
+         if not entities.get("metric"):
             user_query = f"{user_query} ({conversation_state.last_metric})"
             logger.info(f"Refined Query (Metric Injection): {user_query}")
     
-    if is_vague_followup and not conversation_state.last_metric:
-        return {
-            "answer": "Context is missing. Do you mean revenue, net profit, or operating profit?",
-            "confidence": "Low",
-            "score": 0.0,
-            "sources": []
-        }
-
     if is_comparison:
         if not entities.get("company") and conversation_state.last_company:
                 user_query = f"{user_query} ({conversation_state.last_company})"
@@ -609,7 +604,25 @@ def answer_question(user_query: str) -> dict:
     if entities.get("year"): conversation_state.last_year = entities["year"]
     if entities.get("company"): conversation_state.last_company = entities["company"]
 
-    # 4. Embedding
+    # 4. Query Expansion (LLM)
+    expanded_query = user_query
+    if len(user_query.split()) < 10: # Only expand short queries
+        try:
+            logger.info("Expanding query for abbreviations...")
+            expansion_response = client.chat.completions.create(
+                model=CHAT_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": "You are a financial query assistant. Rewrite the user's query by expanding common financial abbreviations (e.g., 'CEO', 'PAT', 'YoY', 'EBITDA') into their full forms. Do not add extra information or change the meaning. Return ONLY the expanded query."},
+                    {"role": "user", "content": user_query}
+                ],
+                temperature=0
+            )
+            expanded_query = expansion_response.choices[0].message.content.strip()
+            logger.info(f"Expanded Query: {expanded_query}")
+        except Exception as e:
+            logger.error(f"Query expansion failed: {e}")
+
+    # 4. Embedding (Use Expanded Query)
     logger.info("Generating embedding...")
 
     if "confident" in user_query.lower():
@@ -628,38 +641,149 @@ def answer_question(user_query: str) -> dict:
             "sources": []
         }
 
-    query_embedding = get_query_embedding(user_query)
+    query_embedding = get_query_embedding(expanded_query)
     if not query_embedding:
         return { "answer": "Error generating embedding.", "confidence": "Low", "score": 0.0, "sources": [] }
 
     # 5. Vector Search (Adaptive)
     logger.info("Searching MongoDB (Vector Search)...")
     
-    search_filter = None
+    # ---------------------------------------------------------
+    # STRICT DYNAMIC MULTI-COMPANY ISOLATION (NO HARDCODING)
+    # ---------------------------------------------------------
+
+    search_filter = {}
+
+    # Document type filter (keep your existing logic)
     if intent == "management_commentary":
-        search_filter = { "metadata.document_type": { "$in": ["transcript", "ppt"] } }
-    elif intent == "financial_data":
-        search_filter = { "metadata.document_type": { "$in": ["annual_report", "ppt", "table"] } }
-    elif intent == "comparison":
-        search_filter = { "metadata.document_type": { "$in": ["annual_report", "ppt", "table"] } }
+        search_filter["metadata.document_type"] = {"$in": ["transcript", "ppt"]}
+    elif intent in ["financial_data", "comparison"]:
+        search_filter["metadata.document_type"] = {"$in": ["annual_report", "ppt", "table"]}
+
+    detected_company = None
+    available_companies = []
+
+    # Fetch all available companies dynamically
+    try:
+        available_companies = collection.distinct("metadata.company")
+        available_companies = [
+            c.strip() 
+            for c in available_companies 
+            if c and c.strip().lower() != "unknown"
+        ]
+    except Exception as e:
+        logger.error(f"Failed fetching companies: {e}")
+        available_companies = []
+
+    detected_companies = []
     
-    top_k_val = 15 if intent == "comparison" else 10
+    # 1️⃣ First priority: LLM extracted entity
+    if entities.get("company"):
+        extracted_company = entities["company"].strip()
+        for company in available_companies:
+            if company.lower() in extracted_company.lower():
+                if company not in detected_companies:
+                    detected_companies.append(company)
+
+    # 2️⃣ Fallback: strict substring match
+    query_lower = user_query.lower()
+    for company in available_companies:
+        if company.lower() in query_lower:
+             if company not in detected_companies:
+                 detected_companies.append(company)
+            
+    # Fallback to conversation history only for short queries
+    if (
+        not detected_companies
+        and conversation_state.last_company
+        and len(user_query.split()) <= 4
+    ):
+        detected_companies.append(conversation_state.last_company)
+
+    # If company found → APPLY STRICT FILTER
+    if detected_companies:
+        if intent == "comparison" and len(detected_companies) > 1:
+             search_filter["metadata.company"] = {"$in": detected_companies}
+             logger.info(f"🔒 MULTI-COMPANY FILTER: {detected_companies}")
+        else:
+             # Default to first company for strict isolation
+             search_filter["metadata.company"] = detected_companies[0]
+             logger.info(f"🔒 STRICT COMPANY FILTER APPLIED: {detected_companies[0]}")
+    
+    # If user did not mention company and not general intent → ask explicitly
+    elif not detected_companies and available_companies and intent != "general":
+        formatted = ", ".join(available_companies)
+        return {
+            "answer": f"Please specify the company name. Available companies: {formatted}.",
+            "confidence": "Low",
+            "score": 0.0,
+            "sources": []
+        }
+
+    # If filter empty → set None (allows broad search only for General/Comparison)
+    if not search_filter:
+        search_filter = None
+    
+    # RECALL UPGRADE: Increase top_k to 15
+    top_k_val = 15 
 
     search_results = vector_search(collection, query_embedding, top_k=top_k_val, filter_dict=search_filter)
     
+    # ENTERPRISE SAFETY: Do NOT retry without filter if company was specified.
+    # Strict isolation must NEVER be bypassed.
     if not search_results and search_filter is not None:
-        logger.warning("Filter too strict, retrying without filter...")
-        search_results = vector_search(collection, query_embedding, top_k=top_k_val)
+         logger.warning(f"No results found with strict filter: {search_filter}. Returning empty.")
     
     for doc in search_results:
         doc["score"] = calculate_boosted_score(doc)
 
     search_results = deduplicate_results(search_results)
-    search_results = filter_by_score(search_results, min_score=0.78)
+    
+    # RECALL UPGRADE: Lower strict threshold to 0.65 to let Reranker decide
+    search_results = filter_by_score(search_results, min_score=0.65)
     search_results = resolve_financial_conflicts(search_results)
     
     if not search_results:
         return { "answer": "No high-confidence results found. Try rephrasing.", "confidence": "Low", "score": 0.0, "sources": [] }
+
+    # RECALL UPGRADE: LLM Reranking
+    # We select the top 5 most relevant chunks from the top 15 retrieved
+    if len(search_results) > 3:
+        logger.info("Reranking results with LLM...")
+        try:
+            rerank_prompt = f"""
+            Question: {user_query}
+            
+            Retrieved Chunks:
+            """
+            for i, doc in enumerate(search_results):
+                rerank_prompt += f"[{i}] {doc['text'][:300]}...\n"
+                
+            rerank_prompt += """
+            Task: Select the indices of the chunks that are most relevant to answering the question.
+            Prioritize chunks with numeric data for financial queries.
+            Return ONLY a JSON object with a list of indices: {"indices": [0, 2, ...]}
+            Select top 5 maximum.
+            """
+            
+            rerank_response = client.chat.completions.create(
+                model=CHAT_DEPLOYMENT,
+                messages=[{"role": "user", "content": rerank_prompt}],
+                temperature=0,
+                response_format={"type": "json_object"}
+            )
+            import json
+            indices = json.loads(rerank_response.choices[0].message.content).get("indices", [])
+            
+            if indices:
+                reranked_results = [search_results[i] for i in indices if i < len(search_results)]
+                if reranked_results:
+                    search_results = reranked_results
+                    logger.info(f"Reranking kept {len(search_results)} chunks.")
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            # Fallback to top 5 original
+            search_results = search_results[:5]
 
     retrieval_confidence = sum(r["score"] for r in search_results) / len(search_results)
     
@@ -834,10 +958,23 @@ Original Draft:
         seen_sources = set()
         for doc in search_results:
             meta = doc["metadata"]
-            source_id = f"- {meta.get('document_name', 'Unknown')} (Page {meta.get('page_number', 'NA')})"
-            if source_id not in seen_sources:
-                sources_list.append(source_id)
-                seen_sources.add(source_id)
+            # Create structured source object
+            source_obj = {
+                "file": meta.get('document_name', 'Unknown'),
+                "page": meta.get('page_number', 'NA'),
+                "doc_type": meta.get('document_type', 'unknown')
+            }
+            
+            # Deduplicate by serializing to tuple
+            source_tuple = (source_obj["file"], source_obj["page"], source_obj["doc_type"])
+            
+            # Skip NA pages
+            if str(source_obj["page"]) == "NA":
+                continue
+            
+            if source_tuple not in seen_sources:
+                sources_list.append(source_obj)
+                seen_sources.add(source_tuple)
 
     return {
         "answer": final_answer,

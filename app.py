@@ -14,6 +14,7 @@ from imagestopdf_tabledetection.table_detection import run_table_detection
 from data_extraction.financial_extraction import run_extraction as run_financial_extraction
 from data_extraction.transcript_extraction import run_extraction as run_transcript_extraction
 from data_extraction.ppt_extraction import run_ppt_extraction
+from data_extraction.table_extraction import run_table_extraction
 from rag_ingestion.ingest import run_ingestion
 
 # Create FastAPI app
@@ -42,8 +43,11 @@ def health_check():
 def ask_question(request: QueryRequest):
     try:
         response = answer_question(request.question)
-        # Ensure we only return the answer string to match CLI behavior
-        return {"answer": response.get("answer", "No answer found.")}
+        # Return answer AND structured sources
+        return {
+            "answer": response.get("answer", "No answer found."),
+            "sources": response.get("sources", [])
+        }
     except Exception as e:
         return {"error": str(e)}
 
@@ -57,6 +61,8 @@ def detect_document_type(filename: str):
         return "TRANSCRIPT"
     elif "ppt" in name or "presentation" in name:
         return "PRESENTATION"
+    elif "table" in name:
+        return "TABLE"
     else:
         return "FINANCIAL_REPORT"
 
@@ -119,6 +125,12 @@ def process_document(pdf_path: str):
              output_txt = run_ppt_extraction(
                 pdf_path=pdf_path,
                 output_dir=output_subfolder
+            )
+            
+        elif doc_type == "TABLE":
+             output_txt = run_table_extraction(
+                pdf_path=pdf_path,
+                output_folder=output_subfolder
             )
 
         if not output_txt:

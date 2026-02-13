@@ -1,12 +1,23 @@
-boto3
-langchain
-langchain-community
-langchain-openai
-faiss-cpu
-python-dotenv
-pillow
-pypdf
-tiktoken
-streamlit
-pymupdf
-python-multipart
+# Core API & Server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Database & AI
+pymongo>=4.5.0
+openai>=1.10.0
+tiktoken>=0.5.0
+certifi>=2023.7.22
+
+# PDF & Image Processing
+pymupdf>=1.23.0  # Import as fitz
+ultralytics>=8.0.0  # YOLO model
+
+# AWS & Data Processing
+boto3>=1.28.0
+botocore>=1.31.0
+trp>=0.0.2  # Amazon Textract Response Parser
+pandas>=2.0.0
+openpyxl>=3.1.0  # Excel export support

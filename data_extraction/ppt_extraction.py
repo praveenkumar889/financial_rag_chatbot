@@ -246,7 +246,12 @@ def save_narrative_text(data, output_file, metadata):
     
     for page in data:
         page_num = page.get("page_number", "?")
+        
+        # Add Metadata Header for RAG ingestion
+        # Format: [METADATA | Key=Val | Key2=Val2]
+        # This one is tricky because we construct a list of strings, so we add it to list
         narrative_lines.append(f"[METADATA | Page={page_num} | FY={fy} | Quarter={quarter} | Company={company}]")
+        
         narrative_lines.append(f"--- Analysis of Page {page_num} ---")
         
         # Page Summary
