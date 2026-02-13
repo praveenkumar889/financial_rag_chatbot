@@ -9,3 +9,4 @@ pypdf
 tiktoken
 streamlit
 pymupdf
+python-multipart

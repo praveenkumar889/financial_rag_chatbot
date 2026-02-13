@@ -1133,6 +1133,9 @@ def run_extraction(pdf_path, skip_pages=None, output_folder=None):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        return None
+        
+    return output_file
 
 if __name__ == "__main__":
     # Execute only the selected PDF

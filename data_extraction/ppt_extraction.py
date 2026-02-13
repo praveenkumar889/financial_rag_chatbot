@@ -309,27 +309,19 @@ def save_narrative_text(data, output_file, metadata):
     except Exception as e:
         print(f"Error saving narrative text: {e}")
 
-def main():
-    # SET YOUR INPUT PDF PATH HERE IF NOT RUNNING FROM COMMAND LINE
-    default_pdf_path = CONFIG["default_pdf_path"]
-
-    # Check if a path is provided via command line, else use default
-    if len(sys.argv) > 1:
-        pdf_path = sys.argv[1]
-    else:
-        pdf_path = default_pdf_path
+def run_ppt_extraction(pdf_path, output_dir=None):
+    if output_dir is None:
+        output_dir = CONFIG["output_dir"]
 
     # Clean up the path (remove quotes if pasted)
     pdf_path = pdf_path.strip('"').strip("'")
 
     if not os.path.exists(pdf_path):
         print(f"Error: PDF not found at: {pdf_path}")
-        print("Please provide a valid path via command line or update 'default_pdf_path' in the script.")
-        return
+        return None
 
     # Derive output filenames from the PDF name
-    pdf_name = Path(pdf_path).stem  # Gets filename without extension (e.g. 'infy-presentation')
-    output_dir = CONFIG["output_dir"]
+    pdf_name = Path(pdf_path).stem
     os.makedirs(output_dir, exist_ok=True)
     
     json_output_path = os.path.join(output_dir, f"{pdf_name}_extracted_data.json")
@@ -420,8 +412,16 @@ def main():
     # Generate Narrative Text File
     print("Generating narrative text file...")
     save_narrative_text(all_extracted_data, narrative_output_path, document_metadata)
+    
+    return narrative_output_path
 
-    # Semantic structure generation removed as per user request
+def main():
+    if len(sys.argv) > 1:
+        pdf_path = sys.argv[1]
+    else:
+        pdf_path = CONFIG["default_pdf_path"]
+        
+    run_ppt_extraction(pdf_path, CONFIG["output_dir"])
 
 if __name__ == "__main__":
     main()

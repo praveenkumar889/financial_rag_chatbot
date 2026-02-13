@@ -43,10 +43,11 @@ def get_embedding(text):
         print(f"Error generating embedding: {e}")
         return None
 
-def generate_chunk_id(doc_name, text):
-    """Generates a deterministic ID based on document name and text content."""
+def generate_chunk_id(doc_name, text, company="Unknown", year="Unknown"):
+    """Generates a deterministic ID based on document name, metadata, and text content."""
     # Create a unique string based on doc and content
-    unique_string = f"{doc_name}_{text}"
+    # Improvement 2: Include Company and Year for collision safety
+    unique_string = f"{company}_{year}_{doc_name}_{text}"
     # Return MD5 hash
     return hashlib.md5(unique_string.encode('utf-8')).hexdigest()
 
@@ -79,6 +80,8 @@ def connect_mongo():
         # We can create a standard index on metadata fields though.
         collection.create_index([("metadata.document_name", pymongo.ASCENDING)])
         collection.create_index([("metadata.content_type", pymongo.ASCENDING)])
+        # Improvement 1: Unique Index on chunk_id
+        collection.create_index([("chunk_id", pymongo.ASCENDING)], unique=True)
         
         print(f"Connected to MongoDB: {DB_NAME}.{COLLECTION_NAME}")
         return collection
@@ -440,7 +443,7 @@ def chunk_narrative_text(chunk_text, source_meta):
             
     return chunks
 
-def process_file(filepath, doc_type, collection):
+def process_file(filepath, doc_type, collection, additional_metadata=None):
     print(f"Processing {filepath}...")
     
     if not os.path.exists(filepath):
@@ -459,9 +462,13 @@ def process_file(filepath, doc_type, collection):
     base_metadata = {
         "document_name": doc_name,
         "document_type": doc_type,
-        "company": "Infosys", # Hardcoded context
+        # Improvement: Avoid hardcoding "Infosys"
+        "company": additional_metadata.get("company", "Unknown") if additional_metadata else "Unknown",
         "ingested_at": datetime.utcnow()
     }
+
+    if additional_metadata:
+        base_metadata.update(additional_metadata)
 
     chunks_to_insert = []
     BATCH_SIZE = 100 # Flush often to keep SSL alive
@@ -486,14 +493,32 @@ def process_file(filepath, doc_type, collection):
         
         for item in text_chunks:
             # Deterministic ID for Upsert
+            # Extract basic metadata for ID generation
+            company = current_meta.get("company", "Unknown")
+            # Handle variations of 'year' or 'fiscal_year'
+            year = current_meta.get("year") or \
+                   current_meta.get("fiscal_year") or \
+                   current_meta.get("fy") or \
+                   "Unknown"
+
             # ENHANCED: For tables, include page/table context to prevent collisions
             if item["metadata"].get("content_type") == "table_row":
                 unique_str = f"{item['metadata'].get('table_number')}_{item['metadata'].get('page_number')}_{item['text']}"
-                chunk_id = generate_chunk_id(doc_name, unique_str)
+                chunk_id = generate_chunk_id(doc_name, unique_str, company, year)
             else:
-                chunk_id = generate_chunk_id(doc_name, item["text"])
+                chunk_id = generate_chunk_id(doc_name, item["text"], company, year)
             
-            embedding = get_embedding(item["text"])
+            # Improvement 3: Check if embedding exists
+            embedding = None
+            if collection is not None:
+                existing_doc = collection.find_one({"chunk_id": chunk_id}, {"embedding": 1})
+                if existing_doc and "embedding" in existing_doc:
+                    # Reuse existing embedding
+                    embedding = existing_doc["embedding"]
+                    # Optionally log skipping: print(f"Skipping embedding for chunk {chunk_id[:8]}...")
+            
+            if not embedding:
+                embedding = get_embedding(item["text"])
             
             if embedding:
                 chunk_doc = {
@@ -569,6 +594,22 @@ def main():
         
         for txt_file in txt_files:
             process_file(txt_file, doc_type, collection)
+
+def run_ingestion(file_path, company, year, quarter, doc_type):
+    """
+    Orchestrator entry point for single file ingestion.
+    """
+    collection = connect_mongo()
+    if collection is None:
+        raise Exception("MongoDB connection failed")
+
+    meta = {
+        "company": company,
+        "year": year,
+        "quarter": quarter
+    }
+    
+    process_file(file_path, doc_type.lower(), collection, additional_metadata=meta)
 
 if __name__ == "__main__":
     main()

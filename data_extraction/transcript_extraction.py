@@ -332,21 +332,23 @@ class PDFNarrativeExtractor:
     def print_extraction_stats(self):
         print("Extraction Complete.")
 
-def run_extraction(config):
-    input_path = config["path"]
-    output_subfolder = config["output_folder"]
+def run_extraction(pdf_path, output_folder=None):
+    if output_folder is None:
+        output_folder = r"C:\financial_agent\outputs\transcript_extraction"
+
+    input_path = pdf_path
     
     print(f"\n{'='*50}")
     print(f"🚀 STARTING JOB: {str(Path(input_path).name)}")
-    print(f"📂 Output Folder: {output_subfolder}")
+    print(f"📂 Output Folder: {output_folder}")
     print(f"{'='*50}")
     
     if not os.path.exists(input_path):
         print(f"❌ File not found: {input_path}")
-        return
+        return None
 
     input_filename = Path(input_path).stem
-    output_dir = output_subfolder
+    output_dir = output_folder
     os.makedirs(output_dir, exist_ok=True)
     
     output_file = os.path.join(output_dir, f"{input_filename}.txt")
@@ -363,10 +365,16 @@ def run_extraction(config):
         extractor.export_json(json_output_file)
         extractor.print_extraction_stats()
         print(f"\n✅ Success! Output saved to:\n{output_file}")
+        if extractor.doc:
+            extractor.doc.close()
+            
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+    return output_file
 
 if __name__ == "__main__":
     print(f"🎯 Target PDF: {Path(SELECTED_PDF).name}")
@@ -374,11 +382,7 @@ if __name__ == "__main__":
     
     if target_config:
         print("✅ Found matching configuration.")
-        run_extraction(target_config)
+        run_extraction(target_config["path"], target_config["output_folder"])
     else:
         print("⚠️ No specific config found - Running generic extraction")
-        run_extraction({
-             "path": SELECTED_PDF,
-             "skip_pages": set(),
-             "output_folder": r"C:\financial_agent\outputs\transcript_extraction"
-        })
+        run_extraction(SELECTED_PDF, output_folder=r"C:\financial_agent\outputs\transcript_extraction")
