@@ -22,19 +22,33 @@ The system follows a modular pipeline:
 ## ⚡ Quick Start (Copy & Paste)
 Use these commands to quickly set up and run the application on **Windows**.
 
-### 1. First Time Setup
+### 1. First Time Setup (Automated)
+Run the automated setup script to install Python 3.11 environment and dependencies:
+```powershell
+.\setup_project.ps1
+```
+
+### 1b. Manual Setup (Alternative)
+If you prefer manual setup:
 ```powershell
 # 1. Clone the repository
 git clone <your-repo-url>
 cd financial_agent
 
-# 2. Create Virtual Environment
-python -m venv venv
+# 2. Check Python Version (Must be 3.11.x)
+python --version
+# If you have the py launcher:
+# py -3.11 --version
 
-# 3. Activate Virtual Environment
+# 3. Create Virtual Environment with Python 3.11
+# Windows Launcher (recommended)
+py -3.11 -m venv venv
+
+# 4. Activate Virtual Environment
 .\venv\Scripts\activate
 
-# 4. Install Dependencies
+# 5. Install Dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
