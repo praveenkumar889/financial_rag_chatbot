@@ -6,7 +6,11 @@ load_dotenv()
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from rag_core.engine import answer_question
+from rag_core.logger_config import setup_logger
+from rag_core.engine_two import answer_adaptive
+
+# Initialize Logging (Root Logger)
+setup_logger()
 
 # Imports for Orchestrator
 from imagestopdf_tabledetection.pdf_to_images import convert_pdf_to_images
@@ -18,7 +22,7 @@ from data_extraction.table_extraction import run_table_extraction
 from rag_ingestion.ingest import run_ingestion
 
 # Create FastAPI app
-app = FastAPI(title="Financial RAG API")
+app = FastAPI(title="Financial RAG")
 
 # Configuration
 IMAGES_ROOT = "images_from_pdf"
@@ -42,11 +46,13 @@ def health_check():
 @app.post("/ask")
 def ask_question(request: QueryRequest):
     try:
-        response = answer_question(request.question)
-        # Return answer AND structured sources
+        response = answer_adaptive(request.question)
+        # Return answer AND structured sources + debug info
         return {
             "answer": response.get("answer", "No answer found."),
-            "sources": response.get("sources", [])
+            "sources": response.get("sources", []),
+            "method": response.get("method", "unknown"),
+            "confidence": response.get("confidence", "low")
         }
     except Exception as e:
         return {"error": str(e)}
